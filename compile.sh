@@ -20,11 +20,7 @@ echo "Building Swift binary..."
 swiftc "$SOURCE_FILE" -o "$OUTPUT_BINARY" \
     -framework Foundation \
     -framework Vision \
-    -framework AppKit \
-    -framework UserNotifications
-
-# Make it executable
-chmod +x "$OUTPUT_BINARY"
+    -framework AppKit
 
 echo "Compilation complete!"
 echo "Binary location: $OUTPUT_BINARY"

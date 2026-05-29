@@ -1,8 +1,8 @@
 # Local OCR to Clipboard (macOS)
 
-Automatically OCR screenshots and copy text to clipboard on macOS. No cloud services, runs 100% locally.
+Press **Cmd+Shift+4**, drag over text, get the text in your clipboard. 100% native macOS, no cloud services, no global hotkey registration.
 
-Fast and accurate OCR using macOS native Vision framework via Swift!
+![Example](example.gif)
 
 ## Quick Setup
 
@@ -12,32 +12,28 @@ cd localOCRtoClipboard
 ./setup.sh
 ```
 
-That's it! 🎉
+## How it works (the trick)
 
-Just use the native **Cmd+Shift+4** hotkey - text is automatically OCR'd and copied to clipboard!
+Instead of writing a custom global hotkey listener (which would need accessibility permissions and a real app bundle), this hijacks macOS's built-in screenshot hotkey by redirecting where screenshots get saved:
 
-## Example
+```
+Cmd+Shift+4  →  macOS writes PNG  →  /tmp/ocr-screenshots/  →  watcher OCRs it  →  clipboard
+   (you)       (system default        (we redirect here via    (Swift binary +     (NSPasteboard)
+                screenshot key)        `defaults write`)         Vision framework)
+```
 
-![Example](example.gif)
+Three small pieces glue it together:
+
+1. **Redirect screenshot save location** to `/tmp/ocr-screenshots/`:
+   `defaults write com.apple.screencapture location /tmp/ocr-screenshots`
+2. **Disable the 5-second preview thumbnail** so screenshots land in the watched folder immediately.
+3. **Run a Swift binary as a LaunchAgent** that watches that folder via FSEvents. When a PNG appears, it runs `VNRecognizeTextRequest`, copies the result to the clipboard via `NSPasteboard`, then deletes the PNG.
+
+No global hotkey listener, no accessibility prompts, no Python or Homebrew dependencies — just a small Swift binary running as a background service.
 
 ## Usage
 
-1. Press **Cmd+Shift+4** (native macOS screenshot hotkey)
-2. Select area containing text
-3. Text is **instantly** OCR'd and copied to clipboard!
-4. Screenshot is automatically deleted after processing
-
-*Note: Setup disables the 5-second screenshot preview for instant OCR.*
-
-## How it works
-
-- Uses native **Cmd+Shift+4** screenshot hotkey - no custom keybindings needed!
-- Lightweight Swift binary watches `/tmp/ocr-screenshots/` using FSEvents
-- macOS Vision framework extracts text directly - faster and more accurate than Tesseract
-- Text automatically copied to clipboard via NSPasteboard
-- Screenshots auto-deleted immediately after OCR processing
-- Everything stored in `/tmp/ocr-screenshots/` (auto-cleaned on reboot)
-- Runs as LaunchAgent - no Python, no dependencies, just native Swift!
+Press **Cmd+Shift+4**, drag over the text. Done — it's on your clipboard.
 
 ## Uninstall
 
@@ -45,39 +41,31 @@ Just use the native **Cmd+Shift+4** hotkey - text is automatically OCR'd and cop
 ./setup.sh --uninstall
 ```
 
-## Manual Setup
-
-If you prefer to set up manually:
-
-1. Compile the Swift binary:
-   ```bash
-   ./compile.sh
-   ```
-
-2. Set screenshot location:
-   ```bash
-   defaults write com.apple.screencapture location /tmp/ocr-screenshots
-   killall SystemUIServer
-   ```
-
-3. Install LaunchAgent:
-   ```bash
-   # Update the plist with your binary path
-   sed "s|BINARY_PATH_PLACEHOLDER|$(pwd)/ocr-watcher|g" com.local.ocr-watcher.plist > ~/Library/LaunchAgents/com.local.ocr-watcher.plist
-
-   # Load the agent
-   launchctl load ~/Library/LaunchAgents/com.local.ocr-watcher.plist
-   ```
+This also resets the screenshot save location and preview thumbnail to macOS defaults.
 
 ## Troubleshooting
 
-Check logs if OCR isn't working:
+Logs:
 ```bash
 tail -f /tmp/ocr-watcher.log
 tail -f /tmp/ocr-watcher-error.log
 ```
 
+LaunchAgent status (should show the agent loaded with exit code 0):
+```bash
+launchctl list | grep ocr
+```
+
+If it's not running, re-run `./setup.sh`. The installed plist is at `~/Library/LaunchAgents/com.local.ocr-watcher.plist`.
+
 ## Requirements
 
-- macOS 10.15+ (for Vision framework)
-- Xcode Command Line Tools (`xcode-select --install`)
+- macOS 10.15+ (for the Vision text-recognition API)
+- Xcode Command Line Tools: `xcode-select --install`
+
+## Files
+
+- `ocr-watcher.swift` — the daemon (~150 LOC)
+- `compile.sh` — builds the Swift binary
+- `setup.sh` — installs everything: compile, write LaunchAgent plist, configure screenshot settings, load agent
+- `com.local.ocr-watcher.plist` — LaunchAgent template (binary path gets substituted at install time)

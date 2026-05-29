@@ -5,24 +5,22 @@ import AppKit
 class OCRWatcher {
     let watchPath: String
     var eventStream: FSEventStreamRef?
+    let eventQueue = DispatchQueue(label: "ocr.fsevents")
 
     init(watchPath: String) {
         self.watchPath = watchPath
-
-        // Create watch directory if it doesn't exist
         try? FileManager.default.createDirectory(atPath: watchPath, withIntermediateDirectories: true)
     }
 
     func startWatching() {
-        // Set stdout/stderr to be unbuffered
         setbuf(stdout, nil)
         setbuf(stderr, nil)
 
         print("[\(Date())] OCR Watcher starting...")
         print("[\(Date())] Watching directory: \(watchPath)")
 
-        // Check for existing files first
-        checkDirectory(watchPath)
+        // Process any files already present at launch
+        checkDirectory()
 
         var context = FSEventStreamContext(
             version: 0,
@@ -32,18 +30,9 @@ class OCRWatcher {
             copyDescription: nil
         )
 
-        let callback: FSEventStreamCallback = { streamRef, clientCallBackInfo, numEvents, eventPaths, eventFlags, eventIds in
+        let callback: FSEventStreamCallback = { _, clientCallBackInfo, _, _, _, _ in
             let watcher = Unmanaged<OCRWatcher>.fromOpaque(clientCallBackInfo!).takeUnretainedValue()
-
-            print("[\(Date())] FSEvent detected, numEvents: \(numEvents)")
-
-            let paths = unsafeBitCast(eventPaths, to: NSArray.self) as! [String]
-
-            for (index, path) in paths.enumerated() {
-                let flags = eventFlags[index]
-                print("[\(Date())] Event for path: \(path), flags: \(flags)")
-                watcher.checkDirectory(path)
-            }
+            watcher.checkDirectory()
         }
 
         let pathsToWatch = [watchPath] as CFArray
@@ -54,7 +43,7 @@ class OCRWatcher {
             &context,
             pathsToWatch,
             FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
-            0.5, // latency in seconds
+            0.1,
             FSEventStreamCreateFlags(kFSEventStreamCreateFlagFileEvents)
         )
 
@@ -63,67 +52,69 @@ class OCRWatcher {
             return
         }
 
-        FSEventStreamScheduleWithRunLoop(stream, CFRunLoopGetCurrent(), CFRunLoopMode.defaultMode.rawValue)
+        FSEventStreamSetDispatchQueue(stream, eventQueue)
 
-        if FSEventStreamStart(stream) {
-            print("[\(Date())] FSEventStream started successfully")
-        } else {
+        if !FSEventStreamStart(stream) {
             print("[\(Date())] ERROR: Failed to start FSEventStream")
-        }
-
-        print("[\(Date())] Ready! Press Cmd+Shift+4 to take a screenshot")
-
-        // Keep the run loop running
-        RunLoop.current.run()
-    }
-
-    func checkDirectory(_ path: String) {
-        print("[\(Date())] Checking directory: \(path)")
-
-        do {
-            let contents = try FileManager.default.contentsOfDirectory(atPath: watchPath)
-            print("[\(Date())] Found \(contents.count) files")
-
-            for file in contents {
-                let fullPath = (watchPath as NSString).appendingPathComponent(file)
-                let fileExtension = (file as NSString).pathExtension.lowercased()
-
-                print("[\(Date())] File: \(file), extension: \(fileExtension)")
-
-                if ["png", "jpg", "jpeg"].contains(fileExtension) {
-                    print("[\(Date())] Processing image: \(file)")
-                    // Small delay to ensure file is fully written
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        self.processImage(at: fullPath)
-                    }
-                }
-            }
-        } catch {
-            print("[\(Date())] ERROR reading directory: \(error)")
-        }
-    }
-
-    func processImage(at path: String) {
-        print("[\(Date())] processImage called for: \(path)")
-
-        guard FileManager.default.fileExists(atPath: path) else {
-            print("[\(Date())] File no longer exists: \(path)")
             return
         }
 
-        print("[\(Date())] Loading image...")
+        print("[\(Date())] Ready! Press Cmd+Shift+4 to take a screenshot")
+        dispatchMain()
+    }
+
+    func checkDirectory() {
+        let contents = (try? FileManager.default.contentsOfDirectory(atPath: watchPath)) ?? []
+        for file in contents {
+            let ext = (file as NSString).pathExtension.lowercased()
+            guard ["png", "jpg", "jpeg"].contains(ext) else { continue }
+            let fullPath = (watchPath as NSString).appendingPathComponent(file)
+            waitForStableFile(at: fullPath) {
+                self.processImage(at: fullPath)
+            }
+        }
+    }
+
+    // Poll the file size every 30ms until we see two consecutive stable reads,
+    // then invoke `completion`. Bails out after `maxWait` regardless.
+    func waitForStableFile(at path: String, maxWait: TimeInterval = 0.5, completion: @escaping () -> Void) {
+        var lastSize: Int64 = -1
+        var stableHits = 0
+        let start = Date()
+        let pollInterval: TimeInterval = 0.03
+
+        func size() -> Int64 {
+            let attrs = try? FileManager.default.attributesOfItem(atPath: path)
+            return (attrs?[.size] as? NSNumber)?.int64Value ?? -1
+        }
+
+        func poll() {
+            let s = size()
+            if s > 0 && s == lastSize {
+                stableHits += 1
+                if stableHits >= 2 { completion(); return }
+            } else {
+                stableHits = 0
+            }
+            lastSize = s
+            if Date().timeIntervalSince(start) > maxWait { completion(); return }
+            eventQueue.asyncAfter(deadline: .now() + pollInterval, execute: poll)
+        }
+        poll()
+    }
+
+    func processImage(at path: String) {
+        guard FileManager.default.fileExists(atPath: path) else { return }
+
         guard let image = NSImage(contentsOfFile: path) else {
             print("[\(Date())] ERROR: Failed to load image: \(path)")
             return
         }
 
-        print("[\(Date())] Converting to CGImage...")
         guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
             print("[\(Date())] ERROR: Failed to get CGImage")
             return
         }
-
-        print("[\(Date())] Starting OCR...")
 
         let request = VNRecognizeTextRequest { request, error in
             if let error = error {
@@ -144,11 +135,9 @@ class OCRWatcher {
                 self.showNotification()
             }
 
-            // Delete the screenshot
             try? FileManager.default.removeItem(atPath: path)
         }
 
-        // Configure for fast, accurate text recognition
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = true
 
@@ -171,16 +160,12 @@ class OCRWatcher {
     }
 
     func showNotification() {
-        // Use NSUserNotificationCenter for command-line tools (deprecated but works)
-        // Or use osascript as a fallback
         let script = """
         display notification "Text copied to clipboard" with title "OCR Complete"
         """
-
         let task = Process()
         task.launchPath = "/usr/bin/osascript"
         task.arguments = ["-e", script]
-
         do {
             try task.run()
         } catch {
@@ -197,7 +182,6 @@ class OCRWatcher {
     }
 }
 
-// Main entry point
 let watchPath = "/tmp/ocr-screenshots"
 let watcher = OCRWatcher(watchPath: watchPath)
 watcher.startWatching()
