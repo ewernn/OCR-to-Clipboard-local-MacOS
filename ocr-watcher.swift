@@ -59,7 +59,7 @@ class OCRWatcher {
             return
         }
 
-        print("[\(Date())] Ready! Press Cmd+Shift+4 to take a screenshot")
+        print("[\(Date())] Ready! Watching \(watchPath) — drop a screenshot here to OCR it")
         dispatchMain()
     }
 
